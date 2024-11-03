@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "moduleResolution": "node",
+    "module": "esm",
+    "strict": true,
+    "types": [
+      "@webgpu/types"
+    ]
+  }
+}
