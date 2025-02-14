@@ -82,6 +82,16 @@ class CPUValidationError implements GPUValidationError {
 	}
 }
 
+class CPUInternalError implements GPUInternalError {
+	__brand: "GPUInternalError";
+	message: string;
+
+	constructor(message: string) {
+		this.__brand = "GPUInternalError";
+		this.message = message;
+	}
+}
+
 class CPUQueue implements GPUQueue {
 	__brand: "GPUQueue";
 	label: string;
@@ -144,23 +154,27 @@ class CPUShaderModule implements GPUShaderModule {
 		this._device = device;
 
 		try {
-			let res = Wesl.main({
+			let res = Wesl.run({
 				command: "Compile",
-				input: descriptor.code,
-				mangler: "None",
-				no_sourcemap: false,
-				no_imports: true,
-				no_cond_comp: true,
-				no_generics: true,
-				no_strip: true,
-				entry_points: null,
-				enable_features: [],
-				disable_features: [],
+				files: { main: descriptor.code },
+				root: "main",
+				mangler: "none",
+				sourcemap: true,
+				imports: false,
+				condcomp: false,
+				generics: false,
+				strip: false,
+				lower: false,
+				validate: false,
+				naga: false,
+				lazy: false,
+				keep: undefined,
+				features: {},
 			});
-			console.log("\x1b[42m[COMPILE]\x1b[0m", res);
+			// console.log("\x1b[42m[COMPILE]\x1b[0m", res);
 		} catch (e) {
 			const err = e as string;
-			console.log("\x1b[42m[COMPILE]\x1b[0m", err, descriptor.code);
+			// console.log("\x1b[42m[COMPILE]\x1b[0m", err, descriptor.code);
 			// TODO: diagnostic source location is incorrect
 			// const diagnostic = err.diagnostics[0]
 			this._messages.push({
@@ -190,11 +204,15 @@ class CPUShaderModule implements GPUShaderModule {
 	}
 }
 
-type CPUComputePipelineDescriptor = GPUComputePipelineDescriptor & {
-	compute: { module: CPUShaderModule };
+type CPUProgrammableStage = GPUProgrammableStage & {
+	module: CPUShaderModule;
 };
 
-function getEntryPoint(wesl: any, stage: string): Object | null {
+type CPUComputePipelineDescriptor = GPUComputePipelineDescriptor & {
+	compute: CPUProgrammableStage;
+};
+
+function getEntryPoint(wesl: any, stage: string): any | null {
 	for (const decl of wesl.global_declarations) {
 		if (decl.Function) {
 			if (decl.Function.attributes.includes(stage)) {
@@ -230,10 +248,16 @@ function getStaticUsages(wesl: any, entryPoint: Object): any[] {
 function createDefaultPipelineLayout(device: CPUDevice, code: string) {
 	let groupCount = 0;
 
-	let wesl = Wesl.main({
-		command: "Dump",
-		input: code,
-	});
+	let wesl;
+	try {
+		wesl = Wesl.run({
+			command: "Dump",
+			source: code,
+		});
+	} catch (e) {
+		console.log("\x1b[42m[DUMP]\x1b[0m", e, code);
+		throw new Error(e as string);
+	}
 
 	let groupDescs = Array.from({ length: device.limits.maxBindGroups }).map(
 		() => ({ entries: [] }) as CPUBindGroupLayoutDescriptor,
@@ -257,13 +281,14 @@ function createDefaultPipelineLayout(device: CPUDevice, code: string) {
 			visibility: shaderStage,
 			// TODO steps 6-10
 		};
-		if (resource.kind.Var?.Storage) {
+		if (
+			typeof resource.kind.Var === "object" &&
+			"Storage" in resource.kind.Var
+		) {
+			const storage = resource.kind.Var.Storage;
 			const bufferLayout: GPUBufferBindingLayout = {
 				minBindingSize: 0, // TODO
-				type:
-					resource.kind.Var.Storage === "Read"
-						? "read-only-storage"
-						: "storage",
+				type: !storage || storage === "Read" ? "read-only-storage" : "storage",
 			};
 			entry.buffer = bufferLayout;
 		}
@@ -283,7 +308,7 @@ function createDefaultPipelineLayout(device: CPUDevice, code: string) {
 		groupLayouts.push(bindGroupLayout);
 	}
 	const desc: CPUPipelineLayoutDescriptor = { bindGroupLayouts: groupLayouts };
-	return device.createPipelineLayout(desc);
+	return [device.createPipelineLayout(desc), wesl];
 }
 
 class CPUComputePipeline implements GPUComputePipeline {
@@ -300,7 +325,15 @@ class CPUComputePipeline implements GPUComputePipeline {
 		if (descriptor.layout === "auto") {
 			const device = descriptor.compute.module._device;
 			const code = descriptor.compute.module._descriptor.code;
-			descriptor.layout = createDefaultPipelineLayout(device, code);
+			const [layout, wesl] = createDefaultPipelineLayout(device, code);
+			descriptor.layout = layout!;
+			if (!descriptor.compute.entryPoint) {
+				const entry = getEntryPoint(wesl, "Compute");
+				if (!entry) throw new Error("no compute entry point in shader");
+				descriptor.compute.entryPoint = entry.name;
+			}
+		} else {
+			throw new Error("todo");
 		}
 	}
 	getBindGroupLayout(index: number): CPUBindGroupLayout {
@@ -386,6 +419,7 @@ class CPUBuffer implements GPUBuffer {
 
 	_descriptor: GPUBufferDescriptor;
 	_buffer: ArrayBuffer;
+	_mappedRange?: [ArrayBuffer, number];
 
 	constructor(descriptor: GPUBufferDescriptor) {
 		this.__brand = "GPUBuffer";
@@ -408,11 +442,18 @@ class CPUBuffer implements GPUBuffer {
 	}
 	getMappedRange(offset?: GPUSize64, size?: GPUSize64): ArrayBuffer {
 		const off = offset ?? 0;
-		const siz = size ?? this._buffer.byteLength;
-		return new Uint8Array(this._buffer, off, siz);
+		const siz = size ?? this._buffer.byteLength - off;
+		const buf = this._buffer.slice(off, off + siz);
+		this._mappedRange = [buf, off];
+		return buf;
 	}
-	unmap(): undefined {}
-	destroy(): undefined {}
+	unmap(): undefined {
+		if (!this._mappedRange)
+			throw new Error("unmap() called but GPUBuffer was not mapped");
+		const [arr, off] = this._mappedRange;
+		new Uint8Array(this._buffer).set(new Uint8Array(arr), off);
+	}
+	destroy(): undefined { }
 }
 
 class CPUPassEncoder {
@@ -450,8 +491,7 @@ class CPUPassEncoder {
 
 class CPUComputePassEncoder
 	extends CPUPassEncoder
-	implements GPUComputePassEncoder
-{
+	implements GPUComputePassEncoder {
 	__brand: "GPUComputePassEncoder";
 
 	_descriptor?: GPUComputePassDescriptor;
@@ -475,6 +515,7 @@ class CPUComputePassEncoder
 		const entry = this._pipeline._descriptor.compute.entryPoint;
 		const code = this._pipeline._descriptor.compute.module._descriptor.code;
 		if (!entry || !code) {
+			console.error(this._pipeline._descriptor.compute);
 			throw new Error("cannot dispatch with no entrypoint/code");
 		}
 
@@ -487,7 +528,7 @@ class CPUComputePassEncoder
 						const buf = e.resource.buffer as CPUBuffer;
 						const off = e.resource.offset ?? 0;
 						const end = e.resource.size ?? buf._buffer.byteLength - off;
-						const data = new Uint8Array(buf._buffer.slice(off, end));
+						const data = new Uint8Array(buf._buffer, off, end);
 						const usage = e.resource.buffer.usage;
 						const layout = this._pipeline.getBindGroupLayout(g.index)
 							._descriptor.entries[e.binding];
@@ -509,7 +550,7 @@ class CPUComputePassEncoder
 							group: g.index,
 							binding: e.binding,
 							kind: kind,
-							data: Array.of(...data), // TODO why is the uint8array not supported?
+							data: data, // TODO why is the uint8array not supported?
 						});
 					}
 				}
@@ -517,24 +558,26 @@ class CPUComputePassEncoder
 		}
 
 		try {
-			let res = Wesl.main({
-				command: "Eval",
-				input: code,
-				mangler: "None",
-				no_sourcemap: false,
-				no_imports: true,
-				no_cond_comp: true,
-				no_generics: true,
-				no_strip: true,
-				entry_points: null,
-				enable_features: [],
-				disable_features: [],
-				runtime: true,
-				expr: entry + "()",
-				bindings: bindings,
-				overrides: [],
+			let res = Wesl.run({
+				command: "Exec",
+				files: { main: code },
+				root: "main",
+				mangler: "none",
+				sourcemap: true,
+				imports: false,
+				condcomp: false,
+				generics: false,
+				strip: false,
+				lower: false,
+				validate: false,
+				naga: false,
+				lazy: false,
+				keep: undefined,
+				features: {},
+				entrypoint: entry,
+				resources: bindings,
+				overrides: {},
 			});
-
 			const [_inst, newBindings] = res as [string, Wesl.Binding[]];
 
 			for (const g of this._bindGroups) {
@@ -543,15 +586,30 @@ class CPUComputePassEncoder
 					for (const e of g.bindGroup._descriptor.entries) {
 						if ("buffer" in e.resource) {
 							const buf = e.resource.buffer as CPUBuffer;
-							// @ts-ignore
 							const newBuf = newBindings.find(
 								(b) => b.group === g.index && b.binding === e.binding,
-							)?.data as Uint8Array;
-							if (buf._buffer.byteLength !== newBuf.byteLength) {
-								console.error(buf._buffer, newBuf.buffer);
-								throw new Error("binding changed size");
+							)?.data;
+							if (!newBuf) {
+								throw new Error(
+									`wesl did not return binding g=${g.index} b=${e.binding}`,
+								);
 							}
-							new Uint8Array(buf._buffer).set(newBuf);
+							const off = e.resource.offset ?? 0;
+							const end = e.resource.size ?? buf._buffer.byteLength - off;
+							if (end !== newBuf.byteLength) {
+								console.error(
+									"binding changed size, size: ",
+									end,
+									"offset: ",
+									off,
+									", old binding:",
+									buf._buffer,
+									"new binding:",
+									newBuf.buffer,
+								);
+								// throw new Error("binding changed size");
+							}
+							new Uint8Array(buf._buffer, off, end).set(newBuf);
 						}
 					}
 				}
@@ -559,8 +617,12 @@ class CPUComputePassEncoder
 			console.log("\x1b[42m[COMPUTE]\x1b[0m", res, code);
 		} catch (e) {
 			const err = e as string;
-			// err(e)
 			console.log("\x1b[42m[COMPUTE]\x1b[0m", err, code);
+			const device = this._pipeline._descriptor.compute.module._device;
+			const scope = device._errorScopes.at(device._errorScopes.length - 1);
+			if (scope && scope.filter === "internal") {
+				scope.error = new GPUInternalError(err);
+			}
 		}
 	}
 	dispatchWorkgroupsIndirect(
@@ -569,7 +631,7 @@ class CPUComputePassEncoder
 	): undefined {
 		throw new Error("Method not implemented: dispatchWorkgroupsIndirect");
 	}
-	end(): undefined {}
+	end(): undefined { }
 	pushDebugGroup(groupLabel: string): undefined {
 		throw new Error("Method not implemented: pushDebugGroup");
 	}
@@ -583,8 +645,7 @@ class CPUComputePassEncoder
 
 class CPURenderPassEncoder
 	extends CPUPassEncoder
-	implements GPURenderPassEncoder
-{
+	implements GPURenderPassEncoder {
 	__brand: "GPURenderPassEncoder";
 
 	_descriptor: GPURenderPassDescriptor;
@@ -807,16 +868,33 @@ class CPUDevice implements GPUDevice {
 
 	constructor() {
 		this.__brand = "GPUDevice";
-		this.features = new Set();
+		this.features = new Set([
+			"depth-clip-control",
+			"depth32float-stencil8",
+			"texture-compression-bc",
+			"texture-compression-bc-sliced-3d",
+			"texture-compression-etc2",
+			"texture-compression-astc",
+			"texture-compression-astc-sliced-3d",
+			"timestamp-query",
+			"indirect-first-instance",
+			"shader-f16",
+			"rg11b10ufloat-renderable",
+			"bgra8unorm-storage",
+			"float32-filterable",
+			"float32-blendable",
+			"clip-distances",
+			"dual-source-blending",
+		]);
 		this.limits = CPUSupportedLimits;
 		this.queue = new CPUQueue();
-		this.lost = new Promise(() => {});
+		this.lost = new Promise(() => { });
 		this.onuncapturederror = null;
 		this.label = "";
 
 		this._errorScopes = [];
 	}
-	destroy(): undefined {}
+	destroy(): undefined { }
 	createBuffer(descriptor: GPUBufferDescriptor): GPUBuffer {
 		return new CPUBuffer(descriptor);
 	}
@@ -844,7 +922,7 @@ class CPUDevice implements GPUDevice {
 	createBindGroup(descriptor: GPUBindGroupDescriptor): GPUBindGroup {
 		return new CPUBindGroup(descriptor);
 	}
-	createShaderModule(descriptor: GPUShaderModuleDescriptor): GPUShaderModule {
+	createShaderModule(descriptor: GPUShaderModuleDescriptor): CPUShaderModule {
 		return new CPUShaderModule(descriptor, this);
 	}
 	createComputePipeline(
@@ -923,7 +1001,24 @@ class CPUAdapter implements GPUAdapter {
 
 	constructor() {
 		this.__brand = "GPUAdapter";
-		this.features = new Set();
+		this.features = new Set([
+			"depth-clip-control",
+			"depth32float-stencil8",
+			"texture-compression-bc",
+			"texture-compression-bc-sliced-3d",
+			"texture-compression-etc2",
+			"texture-compression-astc",
+			"texture-compression-astc-sliced-3d",
+			"timestamp-query",
+			"indirect-first-instance",
+			"shader-f16",
+			"rg11b10ufloat-renderable",
+			"bgra8unorm-storage",
+			"float32-filterable",
+			"float32-blendable",
+			"clip-distances",
+			"dual-source-blending",
+		]);
 		this.limits = CPUSupportedLimits;
 		this.info = CPUAdapterInfo;
 		this.isFallbackAdapter = false;
@@ -940,7 +1035,11 @@ class CPU implements GPU {
 
 	constructor() {
 		this.__brand = "GPU";
-		this.wgslLanguageFeatures = new Set();
+		this.wgslLanguageFeatures = new Set([
+			"shader-f16",
+			"clip-distances",
+			"dual-source-blending",
+		]);
 	}
 	async requestAdapter(
 		options?: GPURequestAdapterOptions,
@@ -953,7 +1052,7 @@ class CPU implements GPU {
 }
 
 const mod: GPUProviderModule = {
-	create: function (flags: string[]): GPU {
+	create: function(flags: string[]): GPU {
 		return new CPU();
 	},
 };
@@ -1008,6 +1107,6 @@ globalThis.GPUPipelineError = CPUPipelineError;
 
 // @ts-ignore
 globalThis.GPUDevice = CPUDevice;
-// @ts-ignore
 globalThis.GPUValidationError = CPUValidationError;
+globalThis.GPUInternalError = CPUInternalError;
 export const create = mod.create;
