@@ -2,6 +2,7 @@
   "name": "wesl-cpu",
   "version": "1.0.0",
   "description": "testing WESL implementations on the CPU",
+  "type": "module",
   "main": "index.ts",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

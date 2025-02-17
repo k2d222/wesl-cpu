@@ -1,5 +1,14 @@
 import * as Wesl from "./wesl-web/wesl_web.js";
 
+// @ts-ignore
+const DEBUG = process.env.DEBUG === "0" ? false : !!process.env.DEBUG
+
+if (DEBUG) {
+	Wesl.init_log("Debug")
+} else {
+	Wesl.init_log("Info")
+}
+
 // The interface that exposes creation of the GPU, and optional interface to code coverage.
 interface GPUProviderModule {
 	// @returns a GPU with the given flags
@@ -16,8 +25,18 @@ interface CodeCoverageProvider {
 	end(): string;
 }
 
-function err(...msg: any[]) {
-	console.error("\x1b[41m[ERROR]\x1b[0m", ...msg);
+function displayError(kind: string, ...msg: any[]) {
+	if (DEBUG) {
+		console.error(`\x1b[41m[${kind}]\x1b[0m`, ...msg);
+		debugger
+	}
+}
+
+function displayDebug(kind: string, ...msg: any[]) {
+	if (DEBUG) {
+		console.debug(`\x1b[42m[${kind}]\x1b[0m`, ...msg);
+		debugger
+	}
 }
 
 class CPUPipelineError extends DOMException implements GPUPipelineError {
@@ -31,7 +50,7 @@ class CPUPipelineError extends DOMException implements GPUPipelineError {
 		super();
 		this.__brand = "GPUPipelineError";
 		this.reason = options.reason;
-		err(message);
+		displayError('GPUPipelineError', message);
 	}
 }
 
@@ -170,16 +189,16 @@ class CPUShaderModule implements GPUShaderModule {
 				lazy: false,
 				keep: undefined,
 				features: {},
-			});
-			// console.log("\x1b[42m[COMPILE]\x1b[0m", res);
+			}) as string;
+			displayDebug('COMPILE', res)
 		} catch (e) {
-			const err = e as string;
-			// console.log("\x1b[42m[COMPILE]\x1b[0m", err, descriptor.code);
+			const err = e as Wesl.Error;
+			displayError('COMPILE', err.message, '\n', err.source)
 			// TODO: diagnostic source location is incorrect
 			// const diagnostic = err.diagnostics[0]
 			this._messages.push({
 				__brand: "GPUCompilationMessage",
-				message: err,
+				message: err.message,
 				type: "error",
 				lineNum: 0,
 				linePos: 0,
@@ -192,7 +211,7 @@ class CPUShaderModule implements GPUShaderModule {
 				this._device._errorScopes.length - 1,
 			);
 			if (scope && scope.filter === "validation") {
-				scope.error = new GPUValidationError(err);
+				scope.error = new GPUValidationError(err.message);
 			}
 		}
 	}
@@ -254,9 +273,11 @@ function createDefaultPipelineLayout(device: CPUDevice, code: string) {
 			command: "Dump",
 			source: code,
 		});
+		displayDebug('DUMP', wesl)
 	} catch (e) {
-		console.log("\x1b[42m[DUMP]\x1b[0m", e, code);
-		throw new Error(e as string);
+		let err = e as Wesl.Error
+		displayError('DUMP', err.message, '\n', err.source)
+		throw new Error(err.message);
 	}
 
 	let groupDescs = Array.from({ length: device.limits.maxBindGroups }).map(
@@ -330,7 +351,7 @@ class CPUComputePipeline implements GPUComputePipeline {
 			if (!descriptor.compute.entryPoint) {
 				const entry = getEntryPoint(wesl, "Compute");
 				if (!entry) throw new Error("no compute entry point in shader");
-				descriptor.compute.entryPoint = entry.name;
+				descriptor.compute.entryPoint = entry.ident;
 			}
 		} else {
 			throw new Error("todo");
@@ -515,7 +536,8 @@ class CPUComputePassEncoder
 		const entry = this._pipeline._descriptor.compute.entryPoint;
 		const code = this._pipeline._descriptor.compute.module._descriptor.code;
 		if (!entry || !code) {
-			console.error(this._pipeline._descriptor.compute);
+			console.error("compute GpuProgrammableStage:", this._pipeline._descriptor.compute);
+			debugger
 			throw new Error("cannot dispatch with no entrypoint/code");
 		}
 
@@ -558,7 +580,7 @@ class CPUComputePassEncoder
 		}
 
 		try {
-			let res = Wesl.run({
+			let newBindings = Wesl.run({
 				command: "Exec",
 				files: { main: code },
 				root: "main",
@@ -577,8 +599,9 @@ class CPUComputePassEncoder
 				entrypoint: entry,
 				resources: bindings,
 				overrides: {},
-			});
-			const [_inst, newBindings] = res as [string, Wesl.Binding[]];
+			}) as Wesl.Binding[];
+
+			displayDebug('EXEC', newBindings)
 
 			for (const g of this._bindGroups) {
 				// TODO dynamic offsets (g.dynamic*)
@@ -614,14 +637,14 @@ class CPUComputePassEncoder
 					}
 				}
 			}
-			console.log("\x1b[42m[COMPUTE]\x1b[0m", res, code);
 		} catch (e) {
-			const err = e as string;
-			console.log("\x1b[42m[COMPUTE]\x1b[0m", err, code);
+			const err = e as Wesl.Error;
+			displayError('EXEC', err.message, '\n', err.source)
+
 			const device = this._pipeline._descriptor.compute.module._device;
 			const scope = device._errorScopes.at(device._errorScopes.length - 1);
 			if (scope && scope.filter === "internal") {
-				scope.error = new GPUInternalError(err);
+				scope.error = new GPUInternalError(err.message);
 			}
 		}
 	}
