@@ -20,6 +20,7 @@ export interface CompileOptions {
     naga: boolean;
     lazy: boolean;
     keep?: string[] | undefined;
+    mangle_root: boolean;
     features: { [name: string]: boolean };
 }
 
