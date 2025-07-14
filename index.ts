@@ -5,6 +5,7 @@ const DEBUG = process.env.DEBUG === "0" ? false : !!process.env.DEBUG;
 
 if (DEBUG) {
   Wesl.init_log("Debug");
+  console.log("wesl-cpu initializing");
 } else {
   Wesl.init_log("Info");
 }
@@ -212,7 +213,7 @@ class CPUShaderModule implements GPUShaderModule {
         this._device._errorScopes.length - 1,
       );
       if (scope && scope.filter === "validation") {
-        scope.error = new GPUValidationError(err.message);
+        scope.errors.push(new GPUValidationError(err.message));
       }
     }
   }
@@ -632,7 +633,7 @@ class CPUComputePassEncoder
               }
               const off = e.resource.offset ?? 0;
               const end = e.resource.size ?? buf._buffer.byteLength - off;
-              if (end !== newBuf.byteLength) {
+              if (DEBUG && end !== newBuf.byteLength) {
                 console.error(
                   "binding changed size, size: ",
                   end,
@@ -657,7 +658,7 @@ class CPUComputePassEncoder
       const device = this._pipeline._descriptor.compute.module._device;
       const scope = device._errorScopes.at(device._errorScopes.length - 1);
       if (scope && scope.filter === "internal") {
-        scope.error = new GPUInternalError(err.message);
+        scope.errors.push(new GPUInternalError(err.message));
       }
     }
   }
@@ -901,7 +902,8 @@ class CPUDevice implements GPUDevice {
     | null;
   label: string;
 
-  _errorScopes: { filter: GPUErrorFilter; error: GPUError | null }[];
+  _errorScopes: { filter: GPUErrorFilter; errors: GPUError[] }[];
+  _lostResolve?: (info: GPUDeviceLostInfo) => void;
 
   constructor() {
     this.__brand = "GPUDevice";
@@ -925,13 +927,21 @@ class CPUDevice implements GPUDevice {
     ]);
     this.limits = CPUSupportedLimits;
     this.queue = new CPUQueue();
-    this.lost = new Promise(() => {});
+    this.lost = new Promise((resolve) => {
+      this._lostResolve = resolve;
+    });
     this.onuncapturederror = null;
     this.label = "";
 
     this._errorScopes = [];
   }
-  destroy(): undefined {}
+  destroy(): undefined {
+    this._lostResolve?.({
+      __brand: "GPUDeviceLostInfo",
+      reason: "destroyed",
+      message: "GPUDevice was destroyed",
+    });
+  }
   createBuffer(descriptor: GPUBufferDescriptor): GPUBuffer {
     return new CPUBuffer(descriptor);
   }
@@ -996,11 +1006,14 @@ class CPUDevice implements GPUDevice {
     throw new Error("Method not implemented: createQuerySet");
   }
   pushErrorScope(filter: GPUErrorFilter): undefined {
-    this._errorScopes.push({ filter, error: null });
+    this._errorScopes.push({ filter, errors: [] });
   }
   async popErrorScope(): Promise<GPUError | null> {
     const scope = this._errorScopes.pop();
-    return scope?.error ?? null;
+    if (!scope) {
+      throw new DOMException("Error scope stack is empty", "OperationError");
+    }
+    return scope.errors.at(0) ?? null;
   }
   addEventListener(
     type: string,
