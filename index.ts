@@ -189,6 +189,7 @@ class CPUShaderModule implements GPUShaderModule {
         naga: false,
         lazy: false,
         keep: undefined,
+        keep_root: false,
         mangle_root: false,
         features: {},
       }) as string;
@@ -608,6 +609,7 @@ class CPUComputePassEncoder
         naga: false,
         lazy: false,
         keep: undefined,
+        keep_root: false,
         mangle_root: false,
         features: {},
         entrypoint: entry,
