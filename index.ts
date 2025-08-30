@@ -309,14 +309,13 @@ function createDefaultPipelineLayout(device: CPUDevice, code: string) {
       visibility: shaderStage,
       // TODO steps 6-10
     };
-    if (
-      typeof resource.kind.Var === "object" &&
-      "Storage" in resource.kind.Var
-    ) {
-      const storage = resource.kind.Var.Storage;
+    console.log(resource);
+    if (resource.kind.Var && resource.kind.Var.includes("Storage")) {
       const bufferLayout: GPUBufferBindingLayout = {
         minBindingSize: 0, // TODO
-        type: !storage || storage === "Read" ? "read-only-storage" : "storage",
+        type: resource.kind.Var.includes("ReadWrite")
+          ? "storage"
+          : "read-only-storage",
       };
       entry.buffer = bufferLayout;
     }
