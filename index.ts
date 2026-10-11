@@ -1,4 +1,5 @@
-import * as Wesl from "./wesl-web/wesl_web.js";
+import InitWesl, * as Wesl from "wesl-rs-web";
+await InitWesl()
 
 // @ts-ignore
 const DEBUG = process.env.DEBUG === "0" ? false : !!process.env.DEBUG;
@@ -60,7 +61,7 @@ const Error = CPUPipelineError;
 const CPUSupportedLimits: GPUSupportedLimits = {
   __brand: "GPUSupportedLimits",
   maxTextureDimension1D: 8192,
-  maxTextureDimension2D: 8292,
+  maxTextureDimension2D: 8192,
   maxTextureDimension3D: 2048,
   maxTextureArrayLayers: 256,
   maxBindGroups: 4,
@@ -177,11 +178,12 @@ class CPUShaderModule implements GPUShaderModule {
       let res = Wesl.run({
         command: "Compile",
         files: { "package::main": descriptor.code },
-        root: "package::main",
+        main: "package::main",
         mangler: "none",
         sourcemap: true,
         imports: false,
         condcomp: false,
+        visibility: false,
         generics: false,
         strip: false,
         lower: false,
@@ -189,8 +191,8 @@ class CPUShaderModule implements GPUShaderModule {
         naga: false,
         lazy: false,
         keep: undefined,
-        keep_root: false,
-        mangle_root: false,
+        keep_main: false,
+        mangle_main: false,
         features: {},
       }) as string;
       displayDebug("COMPILE", res);
@@ -280,7 +282,7 @@ function createDefaultPipelineLayout(device: CPUDevice, code: string) {
       command: "Dump",
       source: code,
     });
-    displayDebug("DUMP", wesl);
+    // displayDebug("DUMP", wesl);
   } catch (e) {
     let err = e as Wesl.Error;
     displayError("DUMP", err.message, "\n", err.source);
@@ -309,7 +311,6 @@ function createDefaultPipelineLayout(device: CPUDevice, code: string) {
       visibility: shaderStage,
       // TODO steps 6-10
     };
-    console.log(resource);
     if (resource.kind.Var && resource.kind.Var.includes("Storage")) {
       const bufferLayout: GPUBufferBindingLayout = {
         minBindingSize: 0, // TODO
@@ -478,6 +479,8 @@ class CPUBuffer implements GPUBuffer {
     if (!this._mappedRange)
       throw new Error("unmap() called but GPUBuffer was not mapped");
     const [arr, off] = this._mappedRange;
+    this.mapState = "unmapped";
+    this._mappedRange = undefined;
     new Uint8Array(this._buffer).set(new Uint8Array(arr), off);
   }
   destroy(): undefined {}
@@ -536,8 +539,8 @@ class CPUComputePassEncoder
   }
   dispatchWorkgroups(
     workgroupCountX: GPUSize32,
-    workgroupCountY?: GPUSize32,
-    workgroupCountZ?: GPUSize32,
+    workgroupCountY: GPUSize32 = 1,
+    workgroupCountZ: GPUSize32 = 1,
   ): undefined {
     if (!this._pipeline) throw new Error("no pipeline set");
     const entry = this._pipeline._descriptor.compute.entryPoint;
@@ -592,31 +595,74 @@ class CPUComputePassEncoder
       }
     }
 
-    try {
-      let newBindings = Wesl.run({
-        command: "Exec",
-        files: { "package::main": code },
-        root: "package::main",
-        mangler: "none",
-        sourcemap: true,
-        imports: false,
-        condcomp: false,
-        generics: false,
-        strip: false,
-        lower: false,
-        validate: false,
-        naga: false,
-        lazy: false,
-        keep: undefined,
-        keep_root: false,
-        mangle_root: false,
-        features: {},
-        entrypoint: entry,
-        resources: bindings,
-        overrides: {},
-      }) as Wesl.Binding[];
+    let runArgs: Wesl.Command = {
+      command: "Exec",
+      files: { "package::main": code },
+      main: "package::main",
+      mangler: "none",
+      sourcemap: true,
+      imports: false,
+      condcomp: false,
+      visibility: false,
+      generics: false,
+      strip: false,
+      lower: false,
+      validate: false,
+      naga: false,
+      lazy: false,
+      keep: undefined,
+      keep_main: false,
+      mangle_main: false,
+      features: {},
+      entrypoint: entry,
+      resources: bindings,
+      overrides: {},
+      builtins: {},
+      user_inputs: {},
+    };
 
-      displayDebug("EXEC", newBindings);
+    let workgroupSizeX = 1, workgroupSizeY = 1, workgroupSizeZ = 1;
+
+    let workgroupSizeAttr = /@\s*workgroup_size\s*\(\s*(\d+)\s*(,\s*(\d+)\s*(,\s*(\d+)\s*)?)?\)/.exec(code);
+    if (workgroupSizeAttr) {
+      workgroupSizeX = workgroupSizeAttr[1] ? parseInt(workgroupSizeAttr[1]) : 1;
+      workgroupSizeY = workgroupSizeAttr[2] ? parseInt(workgroupSizeAttr[2]) : 1;
+      workgroupSizeZ = workgroupSizeAttr[3] ? parseInt(workgroupSizeAttr[3]) : 1;
+    }
+    displayDebug("WORKGROUP", workgroupSizeX, workgroupSizeY, workgroupSizeZ);
+
+    const numWorkgroups = workgroupCountX * workgroupCountY * workgroupCountZ;
+    const workgroupSize = workgroupSizeX * workgroupSizeY * workgroupSizeZ;
+    const numInvocations = numWorkgroups * workgroupSize;
+
+    try {
+      for (let i = 0; i < numInvocations; i++) {
+        const localIndex = i % workgroupSize;
+        const localIdX = localIndex % workgroupSizeX
+        const localIdY = Math.floor(localIndex / workgroupSizeX) % workgroupSizeY
+        const localIdZ = Math.floor(localIndex / workgroupSizeX / workgroupSizeY) % workgroupSizeZ
+        const workgroupIndex = Math.floor(i / workgroupSize)
+        const workgroupIdX = workgroupIndex % workgroupCountX
+        const workgroupIdY = Math.floor(workgroupIndex / workgroupCountX) % workgroupCountY
+        const workgroupIdZ = Math.floor(workgroupIndex / workgroupCountX / workgroupCountY) % workgroupCountZ
+        const globalIdX = localIdX + workgroupIdX * workgroupSizeX
+        const globalIdY = localIdY + workgroupIdY * workgroupSizeY
+        const globalIdZ = localIdZ + workgroupIdZ * workgroupSizeZ
+        runArgs.builtins = {
+          "local_invocation_id": `vec3<u32>(${localIdX}, ${localIdY}, ${localIdZ})`,
+          "local_invocation_index": `${localIndex}u`,
+          "global_invocation_id": `vec3<u32>(${globalIdX}, ${globalIdY}, ${globalIdZ})`,
+          "global_invocation_index": `${i}u`,
+          "workgroup_id": `vec3<u32>(${workgroupIdX}, ${workgroupIdY}, ${workgroupIdZ})`,
+          "workgroup_index": `${workgroupIndex}u`,
+          "num_workgroups": `vec3<u32>(${workgroupCountX}, ${workgroupCountY}, ${workgroupCountZ})`,
+        }
+        displayDebug("BUILTINS", runArgs.builtins)
+        bindings = Wesl.run(runArgs) as Wesl.Binding[];
+        runArgs.resources = bindings
+      }
+
+      displayDebug("EXEC", bindings);
 
       for (const g of this._bindGroups) {
         // TODO dynamic offsets (g.dynamic*)
@@ -624,7 +670,7 @@ class CPUComputePassEncoder
           for (const e of g.bindGroup._descriptor.entries) {
             if ("buffer" in e.resource) {
               const buf = e.resource.buffer as CPUBuffer;
-              const newBuf = newBindings.find(
+              const newBuf = bindings.find(
                 (b) => b.group === g.index && b.binding === e.binding,
               )?.data;
               if (!newBuf) {
@@ -1146,12 +1192,6 @@ globalThis.GPUTextureUsage = {
   TEXTURE_BINDING: 4,
   STORAGE_BINDING: 8,
   RENDER_ATTACHMENT: 16,
-};
-
-globalThis.GPUShaderStage = {
-  VERTEX: 1,
-  FRAGMENT: 2,
-  COMPUTE: 4,
 };
 
 globalThis.GPUPipelineError = CPUPipelineError;

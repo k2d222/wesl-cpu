@@ -13,6 +13,7 @@
     "@webgpu/types": "^0.1.50"
   },
   "dependencies": {
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "wesl-rs-web": "file:../../wesl-rs/crates/wesl-rs-web"
   }
 }
